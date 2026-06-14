@@ -34,4 +34,4 @@ Relay is a B2B SaaS platform for team project and task management. It helps team
 
 ## License
 
-Proprietary. © 2024 Relay Inc.
+
