@@ -8,6 +8,9 @@ implement, modify, and verify the product directly from them. Each spec declares
 files it governs (`owns`), the rules that must always hold (`Invariants`), where to
 implement them (`Targets`), and how to prove conformance (`Verify`).
 
+> New to spec-driven development? Start with [HOWTO.md](HOWTO.md) — a practical guide for
+> experienced developers on reading specs, steering agents, and updating specs safely.
+
 ## How an Agent Uses These Specs
 
 1. Read [specs/overview.md](specs/overview.md) for the domain model and global invariants.
@@ -32,6 +35,7 @@ A spec is the contract. If code and spec disagree, the spec wins (see [CONTRIBUT
 | [DECISIONS.md](DECISIONS.md) | — | Architectural decision records (the "why") |
 | [CHANGELOG.md](CHANGELOG.md) | — | Spec and release history |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | — | Canonical spec template + ID conventions |
+| [HOWTO.md](HOWTO.md) | — | Human guide: reading specs, steering agents, updating specs |
 
 ## Conventions (agent-facing)
 
