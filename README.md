@@ -32,6 +32,5 @@ Relay is a B2B SaaS platform for team project and task management. It helps team
 - **Infrastructure:** AWS (ECS, RDS, ElastiCache), Terraform
 - **Auth:** JWT + refresh tokens, Google SSO
 
-## License
 
 
