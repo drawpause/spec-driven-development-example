@@ -1,79 +1,104 @@
 # Contributing to Relay Specs
 
-How to write, update, and review specs in this project.
+These specs are written to be **read and executed by coding agents**, not only humans.
+An agent should be able to open any spec and learn exactly which files it governs, what
+must always be true, and how to prove the implementation conforms — without guessing.
 
 ---
 
 ## Guiding Principles
 
 1. **Spec before code.** No feature work begins without an accepted spec.
-2. **One source of truth.** If the spec and code disagree, the spec wins — fix the code, or open a PR to update the spec first.
-3. **Write for a new engineer.** Assume the reader knows software but not this product.
-4. **Decisions live in DECISIONS.md.** The spec describes what and how; DECISIONS.md records why.
+2. **One source of truth.** If the spec and code disagree, the spec wins. Fix the code, or open a PR to update the spec first.
+3. **Machine-checkable over prose.** Prefer a numbered invariant or a runnable command over a paragraph. If a human would have to "use judgement," make the rule explicit.
+4. **Addressable.** Every spec declares the file globs it `owns` and maps each invariant to a concrete file/symbol. An agent must never have to search blindly.
+5. **Decisions live in DECISIONS.md.** The spec describes what and how; DECISIONS.md records why.
 
 ---
 
-## Writing a New Spec
+## ID Conventions
 
-1. Create a markdown file in the appropriate `specs/` subdirectory.
-2. Use the template below.
-3. Open a PR. Request review from at least one engineer and one product stakeholder.
-4. Merge only after approval. Implementation may begin after merge.
+Stable IDs let agents (and other specs) reference rules precisely. Never renumber; mark removed IDs `(removed)` and add new ones.
 
-### Spec Template
+| Kind | Format | Example |
+|---|---|---|
+| Spec | lowercase, matches path under `specs/` | `features/auth` |
+| Invariant | `INV-<AREA>-<n>` | `INV-AUTH-3` |
+| Acceptance criterion | `AC-<AREA>-<n>` | `AC-AUTH-3` |
+| Error code | `SCREAMING_SNAKE` | `EMAIL_NOT_VERIFIED` |
 
-```markdown
-# Feature Name
-
-**Last Updated:** YYYY-MM-DD
-**Status:** Draft | Active | Deprecated
+Each acceptance criterion cites the invariant(s) it proves.
 
 ---
 
-## Summary
-One paragraph. What is this, and why does it exist?
+## Spec Template
 
-## Goals
-- Bullet list of what this spec achieves.
+Every spec begins with a YAML front-matter block and uses these sections in order.
 
-## Non-Goals
-- Explicit list of what is out of scope.
+````markdown
+# <Spec Name>
 
-## Requirements
-
-### Functional
-- [ ] Requirement 1
-- [ ] Requirement 2
-
-### Non-Functional
-- Performance: ...
-- Security: ...
-
-## Behavior
-Prose and/or diagrams describing normal flows and edge cases.
-
-## Acceptance Criteria
-- [ ] Given X, when Y, then Z.
-
-## Open Questions
-- Question (owner: @name, due: YYYY-MM-DD)
+```yaml
+spec: features/<name>
+status: draft | active | deprecated
+last_updated: YYYY-MM-DD
+owns:                      # globs this spec is authoritative for
+  - src/<area>/**
+depends_on:                # other spec ids this relies on
+  - api/errors
 ```
 
+## Summary
+One sentence: what this is and why it exists.
+
+## Invariants
+Numbered, stable, machine-checkable. Use MUST / MUST NOT (RFC 2119).
+
+- **INV-<AREA>-1:** <a single, testable rule>.
+
+## Contract
+The precise interface: request/response schemas, state machines, event shapes.
+Deterministic — no "should usually."
+
+## Targets
+Where an agent implements each invariant. Globs allowed; symbols when known.
+
+| Invariant | File | Symbol |
+|---|---|---|
+| INV-<AREA>-1 | `src/<area>/<file>.ts` | `functionName` |
+
+## Acceptance
+Given / When / Then, each citing the invariant(s) it proves.
+
+- **AC-<AREA>-1** (INV-<AREA>-1): GIVEN <state> WHEN <action> THEN <observable result>.
+
+## Verify
+Commands an agent runs to prove conformance. Must run headless and exit non-zero on failure.
+
+```bash
+npm test -- <area>
+```
+````
+
 ---
 
-## Updating an Existing Spec
+## Writing or Updating a Spec
 
-- Open a PR with a clear description of what changed and why.
-- If the change is breaking (removes or renames a field, changes an API contract), label the PR `breaking-change` and add an entry to `CHANGELOG.md`.
-- Update the `Last Updated` date at the top of the file.
+1. Create/edit the markdown file in the appropriate `specs/` subdirectory using the template.
+2. Keep `owns` globs accurate — they are the contract for which spec governs a file.
+3. Add or update invariants with new stable IDs; never reuse a retired ID.
+4. Ensure every invariant has at least one acceptance criterion and is reachable by a `Verify` command.
+5. Update `last_updated`. For breaking changes (removed/renamed field, changed contract), label the PR `breaking-change` and add a `CHANGELOG.md` entry.
 
 ---
 
-## Review Checklist
+## Review Checklist (Agent-Runnable)
 
-- [ ] Is the motivation clear?
-- [ ] Are edge cases addressed?
-- [ ] Are acceptance criteria testable?
-- [ ] Does this conflict with any other spec?
-- [ ] Is CHANGELOG.md updated (for breaking changes)?
-- [ ] For API changes: is `specs/api/errors.md` updated if new error codes are introduced?
+- [ ] Front-matter present; `owns` and `depends_on` resolve.
+- [ ] Every invariant uses MUST/MUST NOT and is individually testable.
+- [ ] Every invariant appears in the `Targets` table.
+- [ ] Every acceptance criterion cites at least one invariant ID.
+- [ ] `Verify` commands exist and exit non-zero on failure.
+- [ ] No prose rule that lacks a corresponding invariant.
+- [ ] New error codes are reflected in `specs/api/errors.md`.
+- [ ] `CHANGELOG.md` updated for breaking changes.

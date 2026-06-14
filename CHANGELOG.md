@@ -5,6 +5,18 @@ Format: `[version] — YYYY-MM-DD`
 
 ---
 
+## [0.5.0] — 2026-06-14
+
+### Changed (breaking)
+- **All specs** rewritten to the agent-first format: YAML front-matter (`owns`/`depends_on`), stable `INV-<AREA>-<n>` invariants, `Targets` tables, Given/When/Then acceptance criteria, and runnable `Verify` blocks. See ADR-005.
+- `CONTRIBUTING.md` — replaced the prose spec template with the canonical agent-first template and ID conventions.
+- `specs/ux/flows.md`, `specs/ux/copy.md` — converted from narrative to data tables governing UI behavior and string catalogs.
+
+### Added
+- `DECISIONS.md` — ADR-005: Agent-first spec format.
+
+---
+
 ## [0.4.0] — 2024-11-01
 
 ### Added

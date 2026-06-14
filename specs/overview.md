@@ -1,68 +1,85 @@
 # Relay — Product Overview
 
-**Last Updated:** 2024-11-01
-**Status:** Active
+```yaml
+spec: overview
+status: active
+last_updated: 2026-06-14
+owns:
+  - specs/**          # global invariants and the domain model bind all specs
+depends_on: []
+```
 
----
+## Summary
 
-## Vision
+Relay is a B2B SaaS platform for team project and task management: workspaces contain projects, projects contain tasks, tasks are assigned to members and update in real time.
 
-Relay gives teams a single place to plan, assign, and track work — without the overhead of tools built for enterprise complexity.
+## Domain Model
 
-## Problem
+```
+Workspace 1───* Project 1───* Task *───1 Assignee(User)
+Workspace 1───* Membership *───1 User
+Workspace 1───1 Subscription
+User 1───* Notification
+```
 
-Small and mid-size teams bounce between spreadsheets, chat threads, and heavyweight project management tools that require weeks to configure. Work gets lost in the gaps between those tools.
+Canonical entity IDs are prefixed strings (see `data/schema`): `wsp_`, `prj_`, `tsk_`, `usr_`, `notif_`, `sub_`, `rt_`.
 
-## Solution
+## Invariants
 
-Relay is a lightweight project management platform with just enough structure: workspaces, projects, tasks, assignees, and real-time updates. Nothing more by default; everything extendable via API.
+- **INV-CORE-1:** Every Project MUST belong to exactly one Workspace; every Task MUST belong to exactly one Project. No orphan tasks or projects.
+- **INV-CORE-2:** A Task MUST have at most one assignee, and that assignee MUST be a member of the task's workspace.
+- **INV-CORE-3:** Task `status` MUST be one of `todo`, `in_progress`, `in_review`, `done`, `cancelled`. No other value is writable.
+- **INV-CORE-4:** Every workspace MUST have exactly one `owner` (role) at all times.
+- **INV-CORE-5:** Authorization is workspace-scoped: a user MUST be a member of a workspace to read or write any of its projects or tasks (enforced by `features/auth` and `ops/security`).
+- **INV-CORE-6:** p95 latency for any interactive API request MUST be < 300ms (measured per `ops/observability`).
+- **INV-CORE-7:** Role capabilities MUST follow the Roles table below; a lower role MUST NOT gain a higher role's capability through any endpoint.
 
----
+## Roles
 
-## Goals
+| Role | Manage members | Project settings | Create/assign tasks | Billing | Read tasks |
+|---|---|---|---|---|---|
+| `owner` | yes | yes | yes | yes | yes |
+| `admin` | yes | yes | yes | no | yes |
+| `member` | no | no | yes (in own projects) | no | yes |
+| `guest` | no | no | no | no | invited projects only |
 
-- Help teams of 2–200 people ship work without friction.
-- Provide a clean API so engineering teams can build automations and integrations.
-- Be fast: every interaction < 300ms at p95.
-- Reach product-market fit with a < 3 minute time-to-first-task for new users.
+## Targets
+
+| Invariant | File | Symbol |
+|---|---|---|
+| INV-CORE-1 | `src/db/schema.ts` | foreign keys `projects.workspace_id`, `tasks.project_id` |
+| INV-CORE-2 | `src/tasks/assign.ts` | `assignTask` |
+| INV-CORE-3 | `src/tasks/status.ts` | `TASK_STATUS` enum, `setStatus` |
+| INV-CORE-4 | `src/workspaces/roles.ts` | `transferOwnership` |
+| INV-CORE-5 | `src/auth/authorize.ts` | `requireWorkspaceMember` |
+| INV-CORE-7 | `src/auth/authorize.ts` | `ROLE_CAPABILITIES` |
+
+## Acceptance
+
+- **AC-CORE-1** (INV-CORE-2): GIVEN user U not a member of workspace W WHEN assigning a task in W to U THEN the API returns `VALIDATION_ERROR` and no write occurs.
+- **AC-CORE-2** (INV-CORE-3): GIVEN any task WHEN PATCH sets `status` to a value outside the enum THEN the API returns `VALIDATION_ERROR`.
+- **AC-CORE-3** (INV-CORE-4): GIVEN a workspace with owner O WHEN O is removed without transfer THEN the operation is rejected; ownership transfer is required first.
+- **AC-CORE-4** (INV-CORE-7): GIVEN a `member` WHEN calling a billing endpoint THEN the API returns `FORBIDDEN`.
 
 ## Non-Goals
 
-- We are **not** a document editor (no Notion/Google Docs replacement in v1).
-- We are **not** a chat tool (no Slack replacement).
-- We are **not** targeting enterprises > 500 seats in v1.
-- We are **not** building a mobile app in v1.
-
----
-
-## User Roles
-
-| Role | Description |
-|---|---|
-| **Owner** | Creates and manages a workspace. Responsible for billing. Can do everything Admins can. |
-| **Admin** | Manages members and project settings within a workspace. Cannot access billing. |
-| **Member** | Creates, assigns, and completes tasks within projects they belong to. |
-| **Guest** | View-only access to specific projects they have been explicitly invited to. |
-
----
+Out of scope in v1 (do not implement): document editor, chat, enterprises > 500 seats, native mobile apps.
 
 ## Glossary
 
 | Term | Definition |
 |---|---|
-| **Workspace** | The top-level container for an organization. Tied to one billing subscription. |
-| **Project** | A named collection of tasks within a workspace. Has an optional description and due date. |
-| **Task** | The atomic unit of work. Has a title, status, assignee, due date, and comment thread. |
-| **Status** | A task's current state: `todo`, `in_progress`, `in_review`, `done`, `cancelled`. |
-| **Assignee** | The single member responsible for completing a task. |
-| **Comment** | A message in a task's thread. Supports @mentions and file attachments. |
-| **Notification** | An alert delivered to a user when a relevant event occurs (assignment, mention, etc.). |
+| Workspace | Top-level org container; one billing subscription. |
+| Project | Named collection of tasks within a workspace. |
+| Task | Atomic unit of work: title, status, assignee, due date, comments. |
+| Status | Task state: `todo`, `in_progress`, `in_review`, `done`, `cancelled`. |
+| Assignee | The single member responsible for a task. |
+| Notification | Alert delivered to a user on a relevant event. |
 
----
+## Verify
 
-## Success Metrics
-
-- Time to first task created: < 3 minutes from signup.
-- Weekly active users / total users > 60%.
-- Net Promoter Score > 40 within 6 months of launch.
-- API error rate < 0.1% over any 24-hour window.
+```bash
+npm test -- core/invariants     # INV-CORE-1..4,7
+npm run lint:specs              # front-matter, owns globs, invariant/AC cross-refs
+npm run perf:p95 -- --max 300   # INV-CORE-6 against staging traffic replay
+```

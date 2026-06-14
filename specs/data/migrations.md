@@ -1,71 +1,74 @@
 # Database Migrations
 
-**Last Updated:** 2024-11-01
-
----
-
-## Policy
-
-1. All schema changes must be reflected in `specs/data/schema.md` and reviewed before a migration file is written.
-2. Migrations must be backwards-compatible with the previous deployed version of the application for at least one deploy cycle. This enables zero-downtime deploys.
-3. Never rename or drop a column in a single migration. Add the new column first, backfill data, update application code, then remove the old column in a follow-up migration.
-4. Never use operations that take long table locks in production. Use `CREATE INDEX CONCURRENTLY` and avoid `ALTER TABLE ... ADD COLUMN NOT NULL` without a default.
-
----
-
-## File Naming
-
-```
-migrations/{timestamp}_{description}.sql
+```yaml
+spec: data/migrations
+status: active
+last_updated: 2026-06-14
+owns:
+  - migrations/**
+  - scripts/backfill-*.ts
+depends_on:
+  - data/schema
+  - ops/deployment
 ```
 
-Example:
+## Summary
+
+The policy and history for evolving the Relay schema with zero-downtime, backwards-compatible migrations.
+
+## Invariants
+
+- **INV-MIG-1:** Every migration MUST be backwards-compatible with the previously deployed app version (old code + new schema MUST work) for at least one deploy cycle.
+- **INV-MIG-2:** A column MUST NOT be renamed or dropped in a single migration: add → backfill → switch code → drop in a later migration.
+- **INV-MIG-3:** Migrations MUST NOT take long table locks: use `CREATE INDEX CONCURRENTLY`; never `ALTER TABLE ... ADD COLUMN NOT NULL` without a default.
+- **INV-MIG-4:** Every forward migration `migrations/{ts}_{desc}.sql` MUST have a paired `migrations/{ts}_{desc}.down.sql`.
+- **INV-MIG-5:** Any schema change MUST be reflected in `data/schema` in the same PR (review-enforced).
+- **INV-MIG-6:** A migration with a backfill prerequisite MUST NOT apply its constraint until the named backfill script has run and been verified in staging.
+
+## Contract
+
+File naming:
 ```
-migrations/
-  20240701_001_create_users.sql
-  20240701_002_create_workspaces_projects_tasks.sql
-  20240801_001_add_stripe_customer_id_to_workspaces.sql
+migrations/{timestamp}_{NNN}_{description}.sql
+migrations/{timestamp}_{NNN}_{description}.down.sql
 ```
 
-Each migration file must also have a corresponding rollback file:
+### Migration log
+| ID | Description |
+|---|---|
+| `20240701_001_create_users` | Initial `users`. |
+| `20240701_002_create_workspaces_projects_tasks` | Initial `workspaces`, `projects`, `tasks`, `refresh_tokens`. |
+| `20240801_001_add_stripe_customer_id_to_workspaces` | `stripe_customer_id text NULL` (nullable; NOT NULL added after backfill). |
+| `20240815_001_add_not_null_stripe_customer_id` | NOT NULL on `workspaces.stripe_customer_id` after backfill. Prereq: `scripts/backfill-stripe-customers.ts`. |
+| `20240901_001_create_subscriptions` | `subscriptions` table. |
+| `20241101_001_add_notifications` | `notifications` table; `notification_preferences jsonb DEFAULT '{}'` and `google_id text UNIQUE NULL` on `users`. |
+
+### Backfill procedure (template — 20240815)
+1. `npx ts-node scripts/backfill-stripe-customers.ts --dry-run` and inspect.
+2. Run without `--dry-run` in staging; verify.
+3. Run in production off-peak.
+4. Apply the NOT NULL migration only after all rows populated.
+
+## Targets
+
+| Invariant | File | Symbol |
+|---|---|---|
+| INV-MIG-1,3 | `scripts/lint-migration.ts` | `assertBackwardsCompatible`, `assertNoBlockingLock` |
+| INV-MIG-4 | `scripts/lint-migration.ts` | `assertDownExists` |
+| INV-MIG-5 | CI | `check:schema-drift` |
+| INV-MIG-6 | `migrations/20240815_001_*.sql` | guarded by backfill checkpoint |
+
+## Acceptance
+
+- **AC-MIG-1** (INV-MIG-4): GIVEN any `*.sql` forward migration WHEN scanned THEN a matching `*.down.sql` exists.
+- **AC-MIG-2** (INV-MIG-3): GIVEN a migration containing `ADD COLUMN ... NOT NULL` without `DEFAULT` or a non-concurrent `CREATE INDEX` THEN the linter fails.
+- **AC-MIG-3** (INV-MIG-1): GIVEN the previous app image WHEN run against the new schema in CI THEN its test suite passes.
+- **AC-MIG-4** (INV-MIG-5): GIVEN a migration touching a column WHEN `data/schema` is unchanged in the PR THEN `check:schema-drift` fails.
+
+## Verify
+
+```bash
+npm run lint:migrations         # INV-MIG-3,4
+npm run test:compat -- --prev   # AC-MIG-3: old app vs new schema
+npm run check:schema-drift      # AC-MIG-4
 ```
-migrations/20240701_001_create_users.down.sql
-```
-
----
-
-## Migration Log
-
-### 20240701_001_create_users
-**Description:** Initial `users` table.
-**Columns added:** `id`, `email`, `name`, `password_hash`, `email_verified_at`, `failed_login_attempts`, `locked_until`, `created_at`, `updated_at`.
-
-### 20240701_002_create_workspaces_projects_tasks
-**Description:** Initial `workspaces`, `projects`, `tasks`, and `refresh_tokens` tables.
-
-### 20240801_001_add_stripe_customer_id_to_workspaces
-**Description:** Added `stripe_customer_id text NULLABLE` to `workspaces`.
-**Backwards-compatible:** Added as nullable. NOT NULL constraint added after backfill (see 20240815_001).
-
-### 20240815_001_add_not_null_stripe_customer_id
-**Description:** Added NOT NULL constraint to `workspaces.stripe_customer_id` after backfill completed.
-**Prerequisite:** `scripts/backfill-stripe-customers.ts` must be run and verified in staging before applying to production.
-
-### 20240901_001_create_subscriptions
-**Description:** New `subscriptions` table for mirroring Stripe state.
-
-### 20241101_001_add_notifications
-**Description:** Added `notifications` table and `notification_preferences jsonb DEFAULT '{}'` to `users`.
-**Added:** `google_id text UNIQUE NULLABLE` to `users` (for Google SSO).
-
----
-
-## Backfill Procedures
-
-### 20240815 — Backfill Stripe customer IDs
-After the nullable column was added, all existing workspaces needed a Stripe customer created.
-
-1. Run `npx ts-node scripts/backfill-stripe-customers.ts --dry-run` and inspect output.
-2. Run without `--dry-run` in staging and verify.
-3. Run in production during off-peak hours.
-4. Once all rows are populated, apply `20240815_001_add_not_null_stripe_customer_id.sql`.

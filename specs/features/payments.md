@@ -1,89 +1,82 @@
 # Feature: Payments and Billing
 
-**Last Updated:** 2024-11-01
-**Status:** Active
-
----
+```yaml
+spec: features/payments
+status: active
+last_updated: 2026-06-14
+owns:
+  - src/billing/**
+  - src/server/routes/billing.ts
+  - src/server/routes/webhooks-stripe.ts
+depends_on:
+  - api/rest
+  - api/errors
+  - data/schema
+  - features/notifications
+```
 
 ## Summary
 
-Relay uses Stripe for subscription billing. Each workspace has a subscription tied to a plan. Stripe is the source of truth for subscription state; our database mirrors it via webhooks.
-
----
-
-## Goals
-- Offer three tiers with clear, enforced feature gates.
-- Handle upgrades, downgrades, and cancellations gracefully.
-- Automate invoicing and payment failure handling (dunning).
-
-## Non-Goals
-- One-time purchases or seat-level add-ons.
-- Manual invoicing or offline payment.
-- Currency conversion (USD only in v1).
-- Per-project billing or usage-based pricing.
-
----
+Each workspace has one Stripe-backed subscription; Stripe is the source of truth and our `subscriptions` table mirrors it via verified webhooks.
 
 ## Plans
 
 | Plan | Price | Members | Projects | Storage |
 |---|---|---|---|---|
-| Free | $0/mo | Up to 5 | Up to 3 | 1 GB |
-| Pro | $12/seat/mo | Unlimited | Unlimited | 50 GB |
-| Enterprise | Custom | Unlimited | Unlimited | 1 TB+ |
+| `free` | $0/mo | ≤ 5 | ≤ 3 | 1 GB |
+| `pro` | $12/seat/mo | unlimited | unlimited | 50 GB |
+| `enterprise` | custom | unlimited | unlimited | 1 TB+ |
 
----
+## Invariants
 
-## Requirements
+- **INV-PAY-1:** Subscription state in our DB MUST be mutated ONLY by the verified Stripe webhook handler. No other code path writes `subscriptions`.
+- **INV-PAY-2:** The webhook handler MUST verify the `Stripe-Signature` header against `STRIPE_WEBHOOK_SECRET` before processing; an invalid signature MUST return 400 and perform no write.
+- **INV-PAY-3:** Webhook processing MUST be idempotent: processing the same Stripe `event.id` twice MUST yield identical DB state and side effects exactly once.
+- **INV-PAY-4:** An action exceeding the workspace's plan limit MUST be rejected with 403 `PLAN_LIMIT_EXCEEDED` BEFORE any record is written.
+- **INV-PAY-5:** Upgrades take effect immediately and are prorated; downgrades take effect at `current_period_end`.
+- **INV-PAY-6:** A cancelled subscription MUST retain `pro` access until `current_period_end`, then revert to `free`.
+- **INV-PAY-7:** After the final failed dunning attempt, the workspace MUST be downgraded to `free`.
+- **INV-PAY-8:** Local subscription state MUST converge to Stripe within 60s of a Stripe event.
+- **INV-PAY-9:** Billing endpoints MUST require the workspace `owner` role (else `FORBIDDEN`).
 
-### Functional
-- [ ] Workspace owners can subscribe, upgrade, downgrade, or cancel.
-- [ ] Upgrades are prorated and take effect immediately.
-- [ ] Downgrades take effect at the end of the current billing period.
-- [ ] Cancelled subscriptions retain Pro access until the period end, then revert to Free.
-- [ ] Failed payments trigger a dunning sequence (3 retries over 7 days via Stripe Billing).
-- [ ] After the final failed payment, the workspace is downgraded to Free.
-- [ ] Owners receive email notifications for invoices, payment failures, and plan changes.
+## Contract
 
-### Non-Functional
-- Stripe webhooks must be handled idempotently.
-- Subscription state in our DB must be consistent within 60 seconds of a Stripe event.
+`POST /webhooks/stripe` handler steps:
+1. Verify signature (INV-PAY-2).
+2. Dedupe on `event.id` (INV-PAY-3) using `processed_stripe_events`.
+3. Look up workspace by `stripe_customer_id`.
+4. Upsert the `subscriptions` row.
+5. Enqueue notification/email jobs.
+6. Return `200`. Any non-2xx triggers Stripe retry.
 
----
+Handled events: `customer.subscription.updated`, `customer.subscription.deleted`, `invoice.payment_succeeded`, `invoice.payment_failed`.
 
-## Behavior
+Dunning: 3 retries over 7 days (Stripe Billing); final failure → INV-PAY-7.
 
-### Feature Gating
+## Targets
 
-When a workspace action would exceed its plan limits, the API returns:
-- HTTP `403 Forbidden`
-- Error code `PLAN_LIMIT_EXCEEDED`
-- Details: current plan, the limit hit, and what the next plan would allow
+| Invariant | File | Symbol |
+|---|---|---|
+| INV-PAY-1 | `src/billing/subscriptions.ts` | `applyStripeEvent` (sole writer) |
+| INV-PAY-2 | `src/server/routes/webhooks-stripe.ts` | `verifyStripeSignature` |
+| INV-PAY-3 | `src/billing/idempotency.ts` | `markProcessed`, table `processed_stripe_events` |
+| INV-PAY-4 | `src/billing/limits.ts` | `assertWithinPlan` |
+| INV-PAY-5,6 | `src/billing/transitions.ts` | `scheduleDowngrade`, `applyUpgrade` |
+| INV-PAY-9 | `src/server/routes/billing.ts` | `requireOwner` |
 
-Example: A Free workspace attempting to create its 4th project receives the above response before any record is written.
+## Acceptance
 
-### Webhook Handling
+- **AC-PAY-1** (INV-PAY-4): GIVEN a `free` workspace with 3 projects WHEN creating a 4th THEN response is 403 `PLAN_LIMIT_EXCEEDED` and no project row is created.
+- **AC-PAY-2** (INV-PAY-3): GIVEN a Stripe event WHEN delivered twice THEN `subscriptions` state is identical and only one notification is enqueued.
+- **AC-PAY-3** (INV-PAY-2): GIVEN a webhook with an invalid signature THEN response is 400 and no DB write occurs.
+- **AC-PAY-4** (INV-PAY-5): GIVEN a `free` workspace WHEN upgrading to `pro` THEN access changes immediately and the charge is prorated.
+- **AC-PAY-5** (INV-PAY-6): GIVEN a cancelled subscription THEN the workspace keeps `pro` until `current_period_end`, then reverts to `free`.
+- **AC-PAY-6** (INV-PAY-8): GIVEN `invoice.payment_failed` THEN `subscriptions.status = past_due` and a failure email is enqueued within 60s.
 
-Stripe sends events to `POST /webhooks/stripe`. The handler:
-1. Validates the `Stripe-Signature` header against `STRIPE_WEBHOOK_SECRET`.
-2. Looks up the workspace by `stripe_customer_id`.
-3. Updates the local `subscriptions` row.
-4. Enqueues any relevant notification or email jobs.
+## Verify
 
-Handled events:
-- `customer.subscription.updated`
-- `customer.subscription.deleted`
-- `invoice.payment_succeeded`
-- `invoice.payment_failed`
-
-The handler returns `200 OK` on success. Stripe will retry on any non-2xx response.
-
----
-
-## Acceptance Criteria
-
-- [ ] A Free workspace cannot create a 4th project; the API returns `PLAN_LIMIT_EXCEEDED`.
-- [ ] Upgrading to Pro takes effect immediately and the charge is prorated for the remaining period.
-- [ ] A Stripe `invoice.payment_failed` webhook updates local subscription status to `past_due` and sends a failure email within 5 minutes.
-- [ ] Receiving the same Stripe webhook event twice produces identical DB state (idempotent).
-- [ ] A cancelled subscription's workspace retains Pro access until `current_period_end`, then reverts to Free.
+```bash
+npm test -- billing                         # INV-PAY-1,4,5,6,9
+npm run test:webhooks -- stripe --replay    # INV-PAY-2,3 (signature + idempotency)
+npm run test:int -- billing-convergence     # INV-PAY-8
+```

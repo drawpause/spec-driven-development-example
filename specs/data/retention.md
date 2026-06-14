@@ -1,62 +1,82 @@
 # Data Retention and Deletion
 
-**Last Updated:** 2024-11-01
+```yaml
+spec: data/retention
+status: active
+last_updated: 2026-06-14
+owns:
+  - src/retention/**
+  - src/workers/purge.ts
+depends_on:
+  - data/schema
+  - ops/security
+```
 
----
+## Summary
 
-## Principles
+How long Relay keeps each data class, how deletion and GDPR requests are honored, and the purge guarantees that make deleted data unrecoverable.
 
-- Retain only what is necessary for product functionality and legal compliance.
-- Deleted data must be unrecoverable after the purge window closes.
-- Honour GDPR right-to-erasure requests within 30 days.
-- Audit logs are not subject to user-initiated deletion.
+## Invariants
 
----
+- **INV-RET-1:** Each data class MUST be purged on or before its retention deadline in the schedule below; nothing is kept past it except audit logs.
+- **INV-RET-2:** After the purge window closes, deleted data MUST be unrecoverable (hard-deleted from Postgres and S3).
+- **INV-RET-3:** GDPR right-to-erasure requests MUST complete within 30 days.
+- **INV-RET-4:** Audit logs MUST NOT be deletable by users or admins.
+- **INV-RET-5:** Account deletion MUST revoke all refresh tokens and log the user out immediately.
+- **INV-RET-6:** On account purge, tasks created by the user MUST be reassigned to the workspace owner, not deleted.
+- **INV-RET-7:** Every export and erasure request MUST be recorded in the (non-deletable) audit log.
 
-## Retention Schedule
+## Contract
 
+### Retention schedule
 | Data | Retention | Notes |
 |---|---|---|
-| User accounts | Until deletion request + 30-day hold | Hold allows self-service account recovery |
-| Tasks (soft-deleted) | 90 days from `deleted_at` | Permanently purged after 90 days |
-| File attachments | Until the parent task is purged | Deleted from S3 in the same purge job |
-| Notifications | 1 year from `created_at` | Older records archived then purged |
-| Refresh tokens (revoked) | 90 days from `revoked_at` | Kept for audit; not usable after revocation |
-| Stripe webhook log | 1 year | Kept for billing reconciliation |
-| Audit logs | 3 years | Cannot be deleted by users or admins |
+| User accounts | deletion request + 30-day hold | hold enables self-service recovery |
+| Tasks (soft-deleted) | 90 days from `deleted_at` | then purged |
+| File attachments | until parent task purged | deleted from S3 in same job |
+| Notifications | 1 year from `created_at` | archived then purged |
+| Refresh tokens (revoked) | 90 days from `revoked_at` | audit; unusable after revoke |
+| Stripe webhook log | 1 year | billing reconciliation |
+| Audit logs | 3 years | non-deletable (INV-RET-4) |
 
----
+### Account deletion flow
+1. `users.deleted_at = now()`; revoke all refresh tokens; log out (INV-RET-5).
+2. Send "deletion scheduled for {date}" email.
+3. After 30-day hold: purge `users` row, `notifications`, comments, avatars from S3 (INV-RET-2).
+4. Reassign the user's tasks to workspace owner (INV-RET-6).
+5. Send final confirmation email (retained 7 days post-send, then purged).
 
-## Account Deletion
+### Workspace deletion flow
+1. Email all members.
+2. `workspaces.deleted_at = now()`; cancel Stripe subscription immediately.
+3. After 30-day hold: purge workspace, projects, tasks, comments, attachments, memberships.
 
-When a user initiates account deletion from Settings:
+### GDPR
+- Right to access: `GET /account/export` → JSON archive (profile, tasks, comments, notifications).
+- Right to erasure: account deletion flow; guaranteed ≤ 30 days (INV-RET-3).
 
-1. Account is marked `deleted_at = now()`. All active refresh tokens are revoked.
-2. The user is immediately logged out.
-3. A confirmation email is sent: "Your account deletion is scheduled for {date}."
-4. After the 30-day hold: all user records are purged — `users` row, `notifications`, comments, and avatars from S3.
-5. Tasks created by the user are reassigned to the workspace owner; they are not deleted.
-6. A final email is sent confirming permanent deletion. (Email is retained for 7 days post-send, then purged.)
+## Targets
 
----
+| Invariant | File | Symbol |
+|---|---|---|
+| INV-RET-1,2 | `src/workers/purge.ts` | `runPurgeCycle`, `RETENTION_SCHEDULE` |
+| INV-RET-3 | `src/retention/erasure.ts` | `scheduleErasure` |
+| INV-RET-5 | `src/retention/account.ts` | `deleteAccount` |
+| INV-RET-6 | `src/retention/account.ts` | `reassignTasksToOwner` |
+| INV-RET-7 | `src/retention/audit.ts` | `recordRequest` |
 
-## Workspace Deletion
+## Acceptance
 
-When a workspace owner deletes a workspace:
+- **AC-RET-1** (INV-RET-1): GIVEN a task with `deleted_at` 91 days ago WHEN the purge cycle runs THEN its row and attachments are gone.
+- **AC-RET-2** (INV-RET-5): GIVEN account deletion WHEN initiated THEN all refresh tokens are revoked and the session is invalid immediately.
+- **AC-RET-3** (INV-RET-6): GIVEN account purge WHEN it completes THEN that user's tasks are owned by the workspace owner and still exist.
+- **AC-RET-4** (INV-RET-4): GIVEN an admin WHEN attempting to delete an audit log entry THEN the operation is rejected.
+- **AC-RET-5** (INV-RET-3): GIVEN an erasure request THEN completion timestamp is ≤ 30 days after request.
 
-1. All workspace members are notified by email.
-2. Workspace is marked `deleted_at = now()`. The billing subscription is cancelled in Stripe immediately.
-3. After the 30-day hold: workspace, all projects, tasks, comments, file attachments, and member records are permanently purged.
+## Verify
 
----
-
-## GDPR Compliance
-
-### Right to Access
-Users can export all their data via `GET /account/export`. This produces a JSON archive containing their profile, tasks, comments, and notification history.
-
-### Right to Erasure
-Same as the account deletion flow above. Response is guaranteed within 30 days of the request.
-
-### Record Keeping
-All export and erasure requests are recorded in the audit log and are themselves not deletable.
+```bash
+npm test -- retention/purge        # INV-RET-1,2,6
+npm test -- retention/account      # INV-RET-5
+npm run test:int -- gdpr-erasure   # AC-RET-5
+```

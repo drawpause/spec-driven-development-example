@@ -1,77 +1,90 @@
 # Observability
 
-**Last Updated:** 2024-11-01
+```yaml
+spec: ops/observability
+status: active
+last_updated: 2026-06-14
+owns:
+  - src/server/logging/**
+  - src/server/metrics/**
+  - infra/alerts/**
+depends_on:
+  - architecture
+  - ops/security
+```
 
----
+## Summary
 
-## Logging
+The logging, metrics, and alerting contract that makes Relay debuggable and SLO-enforced in production.
 
-### Format and Collection
-All logs are structured JSON, written to stdout. Collected by the ECS awslogs log driver and shipped to CloudWatch Logs.
+## Invariants
 
-### Required Fields on Every Log Line
+- **INV-OBS-1:** All logs MUST be structured JSON written to stdout and MUST include `timestamp, level, service, request_id, message` (plus `user_id` when authenticated).
+- **INV-OBS-2:** Logs MUST NOT contain passwords, raw tokens, API keys, or full card numbers; email addresses MUST be masked (`j***@example.com`).
+- **INV-OBS-3:** `debug` level MUST be disabled in production.
+- **INV-OBS-4:** Every metric in the Metrics table MUST be emitted with its listed dimensions.
+- **INV-OBS-5:** Every alert in the Alerting table MUST be configured with its condition, window, severity, and runbook link.
+- **INV-OBS-6:** P1 alerts MUST page on-call via PagerDuty; all alerts MUST post to `#alerts`.
 
-| Field | Type | Description |
-|---|---|---|
-| `timestamp` | ISO 8601 | When the event occurred |
-| `level` | string | `error`, `warn`, `info`, or `debug` |
-| `service` | string | `api`, `worker`, or `scheduler` |
-| `request_id` | string | UUID, present on all API-originated logs |
-| `user_id` | string | Authenticated user ID, if applicable |
-| `message` | string | Human-readable summary |
+## Contract
 
-### Log Levels
-
-| Level | When to use |
+### Required log fields
+| Field | Type |
 |---|---|
-| `error` | Unhandled exceptions, failed external service calls |
-| `warn` | Recoverable issues (cache miss, retry attempt, degraded response) |
-| `info` | Request lifecycle (start/end), significant business events (user signed up, payment processed) |
-| `debug` | Detailed internal state. **Disabled in production.** |
+| `timestamp` | ISO-8601 |
+| `level` | `error`/`warn`/`info`/`debug` |
+| `service` | `api`/`worker`/`scheduler` |
+| `request_id` | UUID (API-originated) |
+| `user_id` | present if authenticated |
+| `message` | string |
 
-### Sensitive Data
-Never log: passwords, raw tokens, API keys, or full credit card numbers. Email addresses may appear in `info`-level request logs but must be masked: `j***@example.com`.
+Level usage: `error` = unhandled/external failures; `warn` = recoverable (cache miss, retry); `info` = request lifecycle + business events; `debug` = internal state (prod-off, INV-OBS-3).
 
----
+### Metrics
+| Metric | Unit | Dimensions |
+|---|---|---|
+| `api.request.duration` | ms | `method`, `route`, `status_code` |
+| `api.request.count` | count | `method`, `route`, `status_code` |
+| `api.error.rate` | percent | `status_code` |
+| `queue.job.duration` | ms | `queue_name` |
+| `queue.job.failures` | count | `queue_name` |
+| `queue.depth` | count | `queue_name` |
+| `ws.connections.active` | count | — |
+| `auth.failed_logins` | count | — |
 
-## Metrics
-
-Emitted to CloudWatch Metrics using the `aws-embedded-metrics` library.
-
-| Metric name | Unit | Dimensions | Description |
-|---|---|---|---|
-| `api.request.duration` | Milliseconds | `method`, `route`, `status_code` | Per-endpoint latency |
-| `api.request.count` | Count | `method`, `route`, `status_code` | Request volume |
-| `api.error.rate` | Percent | `status_code` | Rolling error rate |
-| `queue.job.duration` | Milliseconds | `queue_name` | Background job processing time |
-| `queue.job.failures` | Count | `queue_name` | Failed jobs |
-| `queue.depth` | Count | `queue_name` | Pending jobs in queue |
-| `ws.connections.active` | Count | — | Current active WebSocket connections |
-| `auth.failed_logins` | Count | — | Failed login attempts per minute |
-
----
-
-## Alerting
-
-Alerts route to `#alerts` in Slack for all severities. P1 alerts additionally page the on-call engineer via PagerDuty.
-
+### Alerting
 | Alert | Condition | Window | Severity | Runbook |
 |---|---|---|---|---|
-| High API error rate | Error rate > 1% | 5 min sustained | P1 | `runbooks/high-error-rate.md` |
-| High API latency | p95 > 1000ms | 5 min sustained | P2 | `runbooks/high-latency.md` |
-| Deep queue backlog | Queue depth > 1000 | 10 min sustained | P2 | `runbooks/worker-backlog.md` |
-| DB CPU spike | RDS CPU > 80% | 10 min sustained | P2 | `runbooks/db-cpu.md` |
-| Credential stuffing signal | Failed logins > 100/min | 1 min | P1 | `runbooks/credential-stuffing.md` |
-| Health check failing | `/health` non-200 | 2 consecutive checks | P1 | `runbooks/health-check.md` |
+| High API error rate | error rate > 1% | 5 min | P1 | `runbooks/high-error-rate.md` |
+| High API latency | p95 > 1000ms | 5 min | P2 | `runbooks/high-latency.md` |
+| Deep queue backlog | depth > 1000 | 10 min | P2 | `runbooks/worker-backlog.md` |
+| DB CPU spike | RDS CPU > 80% | 10 min | P2 | `runbooks/db-cpu.md` |
+| Credential stuffing | failed logins > 100/min | 1 min | P1 | `runbooks/credential-stuffing.md` |
+| Health check failing | `/health` non-200 | 2 checks | P1 | `runbooks/health-check.md` |
 
----
+Dashboards (CloudWatch `Relay-Production`): API Health, Background Jobs, Database, WebSockets, Auth.
 
-## Dashboards
+## Targets
 
-Maintained in CloudWatch Dashboards under the `Relay-Production` namespace:
+| Invariant | File | Symbol |
+|---|---|---|
+| INV-OBS-1 | `src/server/logging/logger.ts` | `createLogger`, `BASE_FIELDS` |
+| INV-OBS-2 | `src/server/logging/redact.ts` | `redact`, `maskEmail` |
+| INV-OBS-3 | `src/server/logging/logger.ts` | `levelForEnv` |
+| INV-OBS-4 | `src/server/metrics/emit.ts` | `METRICS` |
+| INV-OBS-5,6 | `infra/alerts/*.tf` | alarm definitions |
 
-- **API Health** — request rate, error rate, p50/p95/p99 latency, breakdown by endpoint.
-- **Background Jobs** — queue depth, job throughput, failure rate per queue.
-- **Database** — connection count, CPU utilization, slow query count.
-- **WebSockets** — active connections, message throughput, connection error rate.
-- **Auth** — signups per day, login success/failure rate, lockout events.
+## Acceptance
+
+- **AC-OBS-1** (INV-OBS-1): GIVEN any log line WHEN parsed THEN it has all required fields.
+- **AC-OBS-2** (INV-OBS-2): GIVEN a log call passing a token or email WHEN emitted THEN the token is absent and the email is masked.
+- **AC-OBS-3** (INV-OBS-3): GIVEN `NODE_ENV=production` THEN `debug` logs are suppressed.
+- **AC-OBS-4** (INV-OBS-5): GIVEN the alert config WHEN compared to the Alerting table THEN every alert exists with matching condition/window/severity/runbook.
+
+## Verify
+
+```bash
+npm test -- logging/redact       # INV-OBS-2
+npm test -- logging/fields       # INV-OBS-1,3
+npm run check:alerts             # AC-OBS-4 (config ⇄ spec table)
+```

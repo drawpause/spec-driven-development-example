@@ -72,3 +72,21 @@ Significant technical and product decisions with their rationale. Append new ADR
 - Recurly — similar to Stripe but smaller ecosystem and higher cost at our scale
 
 **Consequences:** Stripe is the source of truth for all subscription state. Our `subscriptions` table mirrors it and is updated via webhooks. Never update subscription state except in response to a verified Stripe webhook. See `specs/features/payments.md`.
+
+---
+
+## ADR-005: Agent-first spec format
+
+**Date:** 2026-06-14
+**Status:** Accepted
+
+**Context:** Coding agents now do most implementation work in this repo. Prose specs written "for a new engineer" forced agents to infer which files a rule governs, what exactly must hold, and how to confirm conformance — producing inconsistent results and silent drift between spec and code.
+
+**Decision:** Rewrite every spec to a machine-executable format: YAML front-matter declaring `owns`/`depends_on`, numbered stable `INV-<AREA>-<n>` invariants in MUST/MUST NOT language, a `Targets` table mapping each invariant to a file/symbol, Given/When/Then acceptance criteria that cite invariant IDs, and a runnable `Verify` block. The canonical template lives in `CONTRIBUTING.md`.
+
+**Alternatives considered:**
+- Keep prose specs, add an agent "style guide" — relies on inference; no enforceable structure
+- JSON/YAML-only specs — machine-precise but unreadable for human review and PRs
+- Gherkin/`.feature` files only — good for acceptance, weak for invariants, schemas, and file ownership
+
+**Consequences:** Markdown stays human-reviewable while every rule is addressable and testable. `owns` globs are authoritative for which spec governs a file; conflicting globs are a spec bug. Acceptance criteria without a cited invariant, or invariants absent from a `Targets` table, fail review. UX flow/copy specs become data tables rather than narrative.

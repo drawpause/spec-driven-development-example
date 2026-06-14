@@ -1,78 +1,82 @@
 # Deployment
 
-**Last Updated:** 2024-11-01
-
----
-
-## Environments
-
-| Environment | URL | Branch | Deploy Trigger |
-|---|---|---|---|
-| `local` | `http://localhost:3000` | any | Manual (`make dev`) |
-| `staging` | `https://staging.relay.app` | `main` | Automatic on push to `main` |
-| `production` | `https://relay.app` | `main` | Manual promote via `make deploy-prod` |
-
----
-
-## Release Process
-
-1. **Open a PR** against `main`. CI runs: unit tests, integration tests, TypeScript type check, ESLint.
-2. **Merge to `main`** (requires 1 approval + passing CI). This automatically deploys to staging.
-3. **Staging verification:** The merging engineer runs a smoke test checklist (see `scripts/smoke-test.md`). The automated E2E suite (Playwright) also runs against staging.
-4. **Promote to production:** Any engineer with deploy access runs `make deploy-prod`. This triggers a rolling ECS deployment.
-5. **Post-deploy health check:** Automated script pings `GET /health` every 10 seconds for 2 minutes. Rolls back automatically if any check returns non-200.
-
----
-
-## Zero-Downtime Deploys
-
-- ECS rolling update: minimum 50% healthy instances, maximum 200% capacity during the rollout.
-- Database migrations run as a separate pre-deploy ECS task, before the new app version starts.
-- Migrations must always be backwards-compatible with the previous app version (old code + new schema must work).
-
----
-
-## Rollback
-
-**Code rollback:** `make rollback` re-deploys the previous ECS task definition. Takes < 5 minutes.
-
-**Database rollback:** Each migration must have a `{name}.down.sql` file. Run `make db-rollback MIGRATION=20241101_001` to apply the down migration.
-
-**SLA:** A rollback must be initiated within 10 minutes of a confirmed incident and completed within 15 minutes.
-
----
-
-## Health Check Endpoint
-
-`GET /health` returns `200 OK` with no auth required:
-
-```json
-{
-  "status": "ok",
-  "version": "0.4.0",
-  "checks": {
-    "database": "ok",
-    "redis": "ok"
-  }
-}
+```yaml
+spec: ops/deployment
+status: active
+last_updated: 2026-06-14
+owns:
+  - .github/workflows/**
+  - infra/ecs/**
+  - Makefile
+depends_on:
+  - architecture
+  - data/migrations
 ```
 
-If any check fails, it returns `503 Service Unavailable` with the failing check identified.
+## Summary
 
----
+How Relay ships: CI gates, environment promotion, zero-downtime ECS rollouts, migration ordering, rollback SLAs, and the health contract.
 
-## Environment Variables
+## Invariants
 
-All secrets are stored in AWS Secrets Manager and injected into ECS tasks at runtime. They are never stored in `.env` files committed to the repository.
+- **INV-DEPLOY-1:** Merges to `main` MUST pass CI (unit + integration tests, `tsc`, ESLint) and MUST auto-deploy to staging.
+- **INV-DEPLOY-2:** Production deploys MUST be a manual promote (`make deploy-prod`) and MUST use a rolling ECS update (min 50% healthy, max 200% capacity).
+- **INV-DEPLOY-3:** Migrations MUST run as a pre-deploy ECS task before new app tasks start (architecture INV-ARCH-5).
+- **INV-DEPLOY-4:** Post-deploy health checks MUST poll `GET /health` and auto-rollback if any check is non-200.
+- **INV-DEPLOY-5:** `GET /health` MUST require no auth and return 200 only when all dependency checks pass, else 503 with the failing check named.
+- **INV-DEPLOY-6:** Secrets MUST come from AWS Secrets Manager at runtime; no secret values in repo, `.env`, or task definitions.
+- **INV-DEPLOY-7:** Rollback MUST be initiable within 10 min of a confirmed incident and complete within 15 min.
 
-| Variable | Description |
-|---|---|
-| `DATABASE_URL` | PostgreSQL connection string |
-| `REDIS_URL` | Redis connection string |
-| `JWT_SECRET` | HMAC secret for signing JWTs |
-| `STRIPE_SECRET_KEY` | Stripe API key |
-| `STRIPE_WEBHOOK_SECRET` | Stripe webhook endpoint signing secret |
-| `AWS_SES_FROM_ADDRESS` | From address for transactional email (e.g., `noreply@relay.app`) |
-| `GOOGLE_CLIENT_ID` | Google OAuth 2.0 client ID |
-| `GOOGLE_CLIENT_SECRET` | Google OAuth 2.0 client secret |
-| `APP_BASE_URL` | Public base URL (e.g., `https://relay.app`) for constructing links in emails |
+## Contract
+
+### Environments
+| Env | URL | Branch | Trigger |
+|---|---|---|---|
+| `local` | `http://localhost:3000` | any | `make dev` |
+| `staging` | `https://staging.relay.app` | `main` | auto on push to `main` |
+| `production` | `https://relay.app` | `main` | manual `make deploy-prod` |
+
+### Release process
+1. PR → CI (tests, type check, lint).
+2. Merge to `main` (1 approval + green CI) → auto-deploy staging.
+3. Staging smoke test (`scripts/smoke-test.md`) + Playwright E2E.
+4. `make deploy-prod` → rolling ECS deploy.
+5. Health gate: poll `GET /health` every 10s for 2 min; auto-rollback on any non-200.
+
+### Rollback
+- Code: `make rollback` re-deploys previous task definition (< 5 min).
+- DB: `make db-rollback MIGRATION={id}` applies the paired `.down.sql`.
+
+### Health contract
+```json
+{ "status": "ok", "version": "0.5.0", "checks": { "database": "ok", "redis": "ok" } }
+```
+Any failing check → 503 with that check ≠ `ok`.
+
+### Required env vars (values from Secrets Manager)
+`DATABASE_URL`, `REDIS_URL`, `JWT_SECRET`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `AWS_SES_FROM_ADDRESS`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `APP_BASE_URL`.
+
+## Targets
+
+| Invariant | File | Symbol |
+|---|---|---|
+| INV-DEPLOY-1 | `.github/workflows/ci.yml` | `test`, `deploy-staging` jobs |
+| INV-DEPLOY-2,4 | `infra/ecs/deploy.ts` | `rollingDeploy`, `healthGate` |
+| INV-DEPLOY-3 | `infra/ecs/predeploy-migrate.ts` | `runMigrations` |
+| INV-DEPLOY-5 | `src/server/routes/health.ts` | `health` |
+| INV-DEPLOY-6 | `infra/ecs/task-def.ts` | `secretsFromManager` |
+
+## Acceptance
+
+- **AC-DEPLOY-1** (INV-DEPLOY-5): GIVEN Redis is down WHEN `GET /health` is called THEN response is 503 with `checks.redis != "ok"`.
+- **AC-DEPLOY-2** (INV-DEPLOY-4): GIVEN a deploy whose new tasks fail health THEN the rollout auto-reverts to the prior task definition.
+- **AC-DEPLOY-3** (INV-DEPLOY-3): GIVEN pending migrations WHEN deploying THEN the pre-deploy task completes before any new app task serves traffic.
+- **AC-DEPLOY-4** (INV-DEPLOY-6): GIVEN the repo WHEN scanned THEN no secret value or `.env` with secrets is present.
+
+## Verify
+
+```bash
+npm test -- routes/health        # INV-DEPLOY-5
+npm run check:secrets            # INV-DEPLOY-6 (gitleaks)
+npm run test:deploy -- --dry-run # INV-DEPLOY-2,3,4 against staging
+```
